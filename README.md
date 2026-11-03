@@ -32,9 +32,10 @@ make discover
 After the server is deployed, retrieve its public IP and network CIDR from Latitude. Set NODE_IP, MACHINE_NETWORK_CIDR and the eligible INSTALL_DISK_ID reported by make discover in config/lab.env. Add public DNS records:
 
 - api.latitude-sno.example.com → NODE_IP
+- api-int.latitude-sno.example.com → NODE_IP
 - *.apps.latitude-sno.example.com → NODE_IP
 
-Substitute your actual CLUSTER_NAME/BASE_DOMAIN. Also configure api-int.latitude-sno.example.com → NODE_IP where required. The node must reach the RHACM-assisted service and public image registries, and clients must reach TCP 6443, 80, and 443.
+Substitute your actual CLUSTER_NAME/BASE_DOMAIN. The node must reach the RHACM-assisted service and public image registries, and clients must reach TCP 6443, 80, and 443.
 
 ~~~bash
 CONFIRM_INSTALL=YES make install
