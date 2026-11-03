@@ -8,12 +8,13 @@ variable "project" {
 }
 
 variable "site" {
-  type = string
+  type    = string
+  default = "SGP"
 }
 
 variable "plan" {
   type    = string
-  default = "m4.metal.small"
+  default = "f4-metal-small"
 }
 
 variable "hostname" {

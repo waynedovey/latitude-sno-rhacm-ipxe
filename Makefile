@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: check prepare-hub provision discover install status destroy
+.PHONY: check prepare-hub provision discover dns install status destroy
 
 check:
 	bash scripts/check.sh
@@ -13,6 +13,9 @@ provision:
 
 discover:
 	bash scripts/discover.sh
+
+dns:
+	bash scripts/cloudflare-dns.sh
 
 install:
 	bash scripts/install.sh

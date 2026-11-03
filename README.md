@@ -1,67 +1,90 @@
-# Latitude.sh OpenShift SNO via RHACM + iPXE
+# Latitude.sh SNO — RHACM + iPXE + Cloudflare
 
-Provision an **hourly-billed Latitude.sh bare-metal server** with Terraform, boot the **existing RHACM hub's** Assisted Installer via iPXE, then install a single-node OpenShift spoke. No Metal3/BMC dependency and no second RHACM hub.
+Deploy a **single-node OpenShift (SNO)** cluster on Latitude.sh bare metal using an **existing RHACM hub**, Terraform, and Assisted Installer iPXE. Cloudflare DNS is configured after the server receives its public IP.
 
-## Hardware and cost
+## Lab defaults
 
-| Plan | CPU | RAM | Disks | Advertised starting price |
-| --- | --- | --- | --- | --- |
-| **m4.metal.small** (default) | 6 cores / 12 SMT threads | 48 GB | 2 × 960 GB NVMe | **US$0.41/hour** |
-| f4.metal.small (fallback) | 12 cores / 24 threads | 96 GB | 2 × 960 GB NVMe | US$0.55/hour |
+| Setting | Value |
+| --- | --- |
+| Cluster | `latitude-sno` |
+| Domain | `digitaldovey.com` |
+| Latitude project | `Red Hat SSA Sandbox` |
+| Latitude site | Singapore (`SGP`) |
+| Latitude plan | `f4.metal.small` (API slug: `f4-metal-small`) |
+| Billing | Hourly, explicitly configured |
 
-OpenShift SNO requires at least 8 vCPUs, 16 GB RAM, and 120 GB disk. **m4.small only qualifies if SMT is enabled and the Assisted Installer sees at least 8 logical CPUs.** If its hardware checks fail, destroy the server and choose f4.small. Rates are *starting* rates, not a real-time location quote. Check plan stock, the exact hourly price, and iPXE availability for your Latitude site *before* approving provisioning. Hourly billing is explicitly configured (the Terraform provider otherwise defaults to monthly).
+The plan is **12 physical cores / 96 GB RAM**. Verify **Singapore stock, current hourly rate and iPXE compatibility** in the [Latitude dashboard](https://www.latitude.sh/dashboard/) before approving an order. This repository does **not** order hardware on its own.
 
 ## Quick start (macOS)
 
-Prerequisites: Terraform >= 1.6, oc authenticated to an existing RHACM/MCE hub with Central Infrastructure Management enabled, jq, dig, curl, and a Red Hat pull secret. You also need a Latitude API token/project and a DNS zone you control.
+Requires `oc` logged into an RHACM/MCE hub with Central Infrastructure Management, Terraform ≥1.6, `jq`, `curl`, `dig`, a Red Hat pull secret, and Cloudflare DNS for the domain.
 
-~~~bash
+```bash
 git clone https://github.com/waynedovey/latitude-sno-rhacm-ipxe.git
 cd latitude-sno-rhacm-ipxe
 mkdir -p private
 cp config/lab.env.example config/lab.env
-# Edit config/lab.env: cluster DNS, Latitude project + site, chosen ClusterImageSet.
-# Save pull-secret JSON to private/pull-secret.json and SSH public key to private/id_ed25519.pub.
-export LATITUDE_AUTH_TOKEN="YOUR_TOKEN_IN_LOCAL_SHELL"
+
+# Set CLUSTER_IMAGE_SET in config/lab.env; check the other defaults.
+oc get clusterimagesets
+# Save pull secret to private/pull-secret.json.
+# Save SSH public key to private/id_ed25519.pub.
+export LATITUDE_AUTH_TOKEN="YOUR_LATITUDE_TOKEN"
+
 make check
 make prepare-hub
 CONFIRM_COST=YES make provision
 make discover
-~~~
+```
 
-After the server is deployed, retrieve its public IP and network CIDR from Latitude. Set NODE_IP, MACHINE_NETWORK_CIDR and the eligible INSTALL_DISK_ID reported by make discover in config/lab.env. Add public DNS records:
+The scripts resolve the Latitude project display name to its project ID using the Latitude API. If preferred, set `LATITUDE_PROJECT` to a `proj_...` ID or slug directly. No server order occurs without `CONFIRM_COST=YES`.
 
-- api.latitude-sno.example.com → NODE_IP
-- api-int.latitude-sno.example.com → NODE_IP
-- *.apps.latitude-sno.example.com → NODE_IP
+When the Agent appears, set the real `NODE_IP`, `MACHINE_NETWORK_CIDR`, and `INSTALL_DISK_ID` in your ignored `config/lab.env` (use the discovered **disk ID**, not a guessed device path).
 
-Substitute your actual CLUSTER_NAME/BASE_DOMAIN. The node must reach the RHACM-assisted service and public image registries, and clients must reach TCP 6443, 80, and 443.
+### Configure Cloudflare DNS
 
-~~~bash
+Create a [Cloudflare API token](https://dash.cloudflare.com/profile/api-tokens) restricted to the `digitaldovey.com` zone, with **Zone / Zone / Read** and **Zone / DNS / Edit** permissions. The script looks up the zone ID automatically; optionally set `CF_ZONE_ID` in `config/lab.env`.
+
+```bash
+export CF_API_TOKEN="YOUR_CLOUDFLARE_TOKEN"
+CONFIRM_DNS=YES make dns
+```
+
+Only three **DNS-only (unproxied) A** records are created:
+
+| Record | Target |
+| --- | --- |
+| `api.latitude-sno.digitaldovey.com` | `NODE_IP` |
+| `api-int.latitude-sno.digitaldovey.com` | `NODE_IP` |
+| `*.apps.latitude-sno.digitaldovey.com` | `NODE_IP` |
+
+`make dns` is idempotent. It **refuses to overwrite** an existing record pointing elsewhere or with the Cloudflare proxy enabled unless you explicitly pass `ALLOW_DNS_REPLACE=YES` as well. It never modifies other domains or records. Ensure your domain's nameservers actually delegate to Cloudflare and allow DNS propagation before installing.
+
+### Install and clean up
+
+```bash
 CONFIRM_INSTALL=YES make install
 make status
-# When finished, stop hourly billing:
+
+# When finished, terminate hourly-billed hardware:
 CONFIRM_DESTROY=YES make destroy
-~~~
+```
 
-**Do not run make install before selecting the correct installation disk.** The disk will be overwritten by OpenShift. The scripts will not automatically modify DNS, approve an Agent, create a Latitude server, or destroy a server without the relevant operator step/confirmation.
+**Important:** Installation overwrites the selected NVMe disk. Ensure the node's public IPv4 stays stable, the node reaches RHACM and image registries, and clients can reach TCP **6443 / 80 / 443**. The install script checks public DNS resolution before approving the Agent.
 
-## How it works
+## Workflow
 
-1. **prepare-hub:** creates only a namespaced pull-secret and InfraEnv on the existing RHACM hub; waits for status.bootArtifacts.ipxeScript.
-2. **provision:** hands the short-lived RHACM iPXE URL to Latitude's Terraform provider with operating_system=ipxe and hourly billing.
-3. **discover:** examines the discovered Agent's CPU/memory/disks/network status; verify its installation disk and public IP.
-4. **install:** checks DNS, machine network, Agent inventory, selected disk and ClusterImageSet; creates AgentClusterInstall + ClusterDeployment with platformType None (no additional VIPs/BMC); binds and approves only the selected Agent.
-5. **status/destroy:** inspect the RHACM install and release the billed server when finished.
+1. `make prepare-hub`: creates a pull secret and InfraEnv in the existing RHACM hub, producing an iPXE boot URL.
+2. `make provision`: Terraform orders the Latitude server in **SGP**, boots RHACM iPXE and uses **hourly** billing.
+3. `make discover`: inspects the Agent, disks and hardware checks.
+4. `make dns`: creates the three Cloudflare records for the assigned IP.
+5. `make install`: creates the AgentClusterInstall/ClusterDeployment and installs SNO; `make status` monitors it.
+6. `make destroy`: releases the billed server (does not automatically delete RHACM resources or Cloudflare DNS).
 
-The iPXE URL is an access-bearing URL and is stored in local Terraform state. State, plan files, tokens, kubeconfigs, pull secrets and lab settings must never be committed. Use a secure local workspace or encrypted backend. The public repository has **no** operational credentials.
+`config/lab.env`, API tokens, pull secrets, kubeconfigs and Terraform state/plans are **never committed**. The InfraEnv iPXE URL is access-bearing and is retained in local Terraform state. Keep that state secure.
 
-This project is an initial repeatable lab implementation, not a claim that Latitude's DHCP/iPXE behaviour has been validated in every metro. Network interface, firmware, public-IP configuration and boot-to-disk behaviour must be tested on the selected site. For static networking / NMState, adapt InfraEnv before provisioning.
+**Validation status:** Terraform and Bash syntax are CI-checked. Latitude iPXE boot, site availability, network setup and Cloudflare API calls still require a live end-to-end test. See [troubleshooting](docs/troubleshooting.md).
 
-## Further reading
+## References
 
-- [RHACM Assisted Installer / InfraEnv](https://docs.redhat.com/en/documentation/red_hat_advanced_cluster_management_for_kubernetes/2.17/html-single/clusters/index)
-- [OpenShift 4.21 SNO requirements](https://docs.redhat.com/en/documentation/openshift_container_platform/4.21/html-single/installing_on_a_single_node/index)
-- [Latitude Terraform provider](https://registry.terraform.io/providers/latitudesh/latitudesh/latest)
-- [Latitude metal prices](https://www.latitude.sh/pricing)
-- [Troubleshooting](docs/troubleshooting.md)
+[Latitude API projects](https://www.latitude.sh/docs/api-reference/get-projects) · [Latitude Terraform](https://registry.terraform.io/providers/latitudesh/latitudesh/latest) · [Cloudflare DNS API](https://developers.cloudflare.com/api/resources/dns/subresources/records/) · [RHACM](https://docs.redhat.com/en/documentation/red_hat_advanced_cluster_management_for_kubernetes/) · [OpenShift SNO](https://docs.redhat.com/en/documentation/openshift_container_platform/4.21/html-single/installing_on_a_single_node/index)

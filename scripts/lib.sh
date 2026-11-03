@@ -12,18 +12,53 @@ need_file() { [[ -s "$1" ]] || die "Missing/empty file: $1"; }
 
 read_config() {
   [[ -f "$CONFIG_FILE" ]] || die "Copy config/lab.env.example to config/lab.env and edit it"
-  # Save environment-provided secrets before sourcing non-secret config.
-  local saved_token="${LATITUDE_AUTH_TOKEN:-}"
+  # Allow environment-provided tokens to take precedence over local config.
+  local saved_latitude_token="${LATITUDE_AUTH_TOKEN:-}"
+  local saved_cf_token="${CF_API_TOKEN:-}"
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
-  [[ -z "$saved_token" ]] || LATITUDE_AUTH_TOKEN="$saved_token"
+  [[ -z "$saved_latitude_token" ]] || LATITUDE_AUTH_TOKEN="$saved_latitude_token"
+  [[ -z "$saved_cf_token" ]] || CF_API_TOKEN="$saved_cf_token"
   : "${CLUSTER_NAME:=latitude-sno}"
-  : "${LATITUDE_PLAN:=m4.metal.small}"
+  : "${BASE_DOMAIN:=digitaldovey.com}"
+  : "${LATITUDE_PLAN:=f4-metal-small}"
+  : "${LATITUDE_SITE:=SGP}"
   : "${LATITUDE_HOSTNAME:=latitude-sno}"
+  : "${CF_ZONE_ID:=}"
   : "${PULL_SECRET_FILE:=private/pull-secret.json}"
   : "${SSH_PUBLIC_KEY_FILE:=private/id_ed25519.pub}"
   [[ "$CLUSTER_NAME" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || die "CLUSTER_NAME must be a Kubernetes-compatible DNS label"
+  [[ "$BASE_DOMAIN" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ]] || die "Invalid BASE_DOMAIN"
+  # Accept the human-readable choices as well as Latitude API identifiers.
+  case "$LATITUDE_SITE" in singapore|Singapore|sgp) LATITUDE_SITE=SGP;; esac
+  case "$LATITUDE_PLAN" in f4.metal.small) LATITUDE_PLAN=f4-metal-small;; esac
+  case "$LATITUDE_PLAN" in m4.metal.small) LATITUDE_PLAN=m4-metal-small;; esac
 }
+
+# Latitude's Terraform provider needs a project ID or slug, not its display name.
+# Resolve display names using the documented read-only GET /projects API.
+resolve_latitude_project() {
+  need_var LATITUDE_PROJECT
+  if [[ "$LATITUDE_PROJECT" =~ ^proj_[a-zA-Z0-9]+$ || "$LATITUDE_PROJECT" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
+    printf '%s\n' "$LATITUDE_PROJECT"
+    return
+  fi
+  need_cmd curl
+  need_cmd jq
+  need_var LATITUDE_AUTH_TOKEN
+  local response found count
+  response="$(curl --fail --silent --show-error --retry 2 --connect-timeout 15 --get \
+    --header "Authorization: $LATITUDE_AUTH_TOKEN" \
+    --data-urlencode "filter[name]=$LATITUDE_PROJECT" \
+    "https://api.latitude.sh/projects")" || die "Unable to look up Latitude project '$LATITUDE_PROJECT'"
+  jq -e '.data | type=="array"' <<< "$response" >/dev/null || die "Latitude project lookup returned unexpected JSON"
+  count="$(jq --arg name "$LATITUDE_PROJECT" '[.data[] | select(.attributes.name==$name)] | length' <<< "$response")"
+  (( count == 1 )) || die "Expected one Latitude project named '$LATITUDE_PROJECT'; found $count. Set LATITUDE_PROJECT to its proj_ ID or slug instead."
+  found="$(jq -r --arg name "$LATITUDE_PROJECT" '.data[] | select(.attributes.name==$name) | .id' <<< "$response")"
+  [[ "$found" == proj_* ]] || die "Latitude project lookup returned an invalid ID"
+  printf '%s\n' "$found"
+}
+
 local_path() { case "$1" in /*) printf '%s' "$1";; *) printf '%s/%s' "$ROOT" "$1";; esac; }
 hub() {
   if [[ -n "${RHACM_KUBECONFIG:-}" ]]; then

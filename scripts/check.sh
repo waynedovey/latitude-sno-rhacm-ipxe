@@ -20,7 +20,9 @@ hub get clusterimageset "$CLUSTER_IMAGE_SET" >/dev/null || die "Missing ClusterI
 info "Hub: $(hub whoami --show-server)"
 info "OpenShift image: $(hub get clusterimageset "$CLUSTER_IMAGE_SET" -ojsonpath='{.spec.releaseImage}')"
 info "Requested Latitude plan: $LATITUDE_PLAN at site $LATITUDE_SITE (confirm availability + hourly price in Latitude)"
-if [[ "$LATITUDE_PLAN" == "m4.metal.small" ]]; then
+info "Latitude project: $LATITUDE_PROJECT"
+info "Cluster FQDN: $CLUSTER_NAME.$BASE_DOMAIN"
+if [[ "$LATITUDE_PLAN" == "m4-metal-small" ]]; then
   info "WARNING: m4.small has six physical cores; SMT must provide >=8 logical vCPUs or Assisted Installer will reject it."
 fi
-info "Checks passed. No servers have been ordered."
+info "Checks passed. No servers have been ordered and no Cloudflare records changed."
