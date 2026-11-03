@@ -15,6 +15,35 @@
 4. The public-IP network configuration varies by site. Use NMStateConfig on InfraEnv **before** provisioning if DHCP does not configure the interface.
 5. Verify the discovery iPXE URL has not expired, and that boot order switches to the local disk after installation.
 
+## AWS hub image download is truncated
+
+Typical symptoms: the Latitude server fetches the RHACM kernel and initrd but stops during the RHCOS live PXE rootfs download; on the boot console you may see `coreos-livepxe-rootfs.service` fail, `curl: (18)`, or an unexpectedly small response. This is a hub ingress/load-balancer issue, not necessarily an iPXE syntax or firmware error.
+
+1. Confirm the current InfraEnv URLs without publishing any token-bearing URLs in chat or logs:
+   ```bash
+   oc -n latitude-sno get infraenv latitude-sno \
+     -o json | jq '.status.bootArtifacts | {kernel,rootfs,ipxeScript}'
+   ```
+2. If the hub's wildcard routes through a Classic Load Balancer and the image transfer is truncated, isolate the image service via a dedicated NLB on the same ingress pods. Use `CONFIRM_IMAGE_NLB=YES make image-nlb`. This **does not** modify `router-default`.
+3. Set `AWS_REGION`, `HUB_PUBLIC_ROUTE53_ZONE_ID`, and `IMAGE_NLB_SERVICE` in `config/lab.env`. Use `make image-check` to verify both TCP listeners, corresponding healthy nodePort target groups, and an entire rootfs transfer through the NLB **before** DNS changes.
+4. Then use `CONFIRM_IMAGE_DNS=YES make image-route53` to create the **specific** image-service A Alias in the public AWS Route53 hub zone. The existing wildcard `*.apps.hub...` stays untouched. Check `aws route53 get-change --id ...` (INSYNC) and `dig @1.1.1.1 +short <image-host>`.
+5. Retry the Latitude iPXE boot only after the full rootfs passes. Do not reboot a host while it is already installing or fetching artifacts.
+
+If `oc describe svc router-nlb-test` shows `SyncLoadBalancerFailed` with `DuplicateTargetGroupName`, inspect the NLB configuration and ensure `externalTrafficPolicy: Local`. The lab's initial NLB had only listener 80, and adding HTTPS 443 originally failed with target-group conflicts. With Local traffic policy, AWS reconciled both listeners and distinct healthy TCP target groups. Do not manually delete a target group attached to a live NLB.
+
+The dedicated NLB has ongoing AWS charges. The scripts intentionally do **not** delete it or its Route53 record on `make destroy`. Preserve the original wildcard/CLB unless you have a separate ingress migration plan.
+
+## Latitude iPXE may boot HookOS first
+
+Latitude's default provisioning chain may boot **Tinkerbell HookOS / LinuxKit** into a root shell before switching to your custom RHACM iPXE script. That screen alone does not mean RHCOS installation failed. Look at the iPXE console for the `assisted-service`, `pxe-initrd`, and `kernel` downloads; then watch RHCOS and Ignition start.
+
+A successful RHCOS boot may show `Ignition: user-provided config was applied` and a login prompt. Discovery is only confirmed when an **Agent appears**:
+```bash
+oc -n latitude-sno get agents -w
+make discover
+```
+Initially `APPROVED=false` and `ROLE=auto-assign` are normal. Do not manually approve the Agent; `make install` validates hardware, disk choice, network/DNS and cluster objects first.
+
 ## Cloudflare DNS
 
 - `make dns` needs `CF_API_TOKEN` with **Zone:Read** and **DNS:Edit**, plus `NODE_IP` in `config/lab.env`.

@@ -9,6 +9,10 @@ need_var LATITUDE_SITE
 [[ "${CONFIRM_COST:-}" == YES ]] || die "This orders billable hourly hardware. Review Latitude price/stock, then run CONFIRM_COST=YES make provision"
 url="$(get_ipxe_url)"
 [[ "$url" == https://* || "$url" == http://* ]] || die "No iPXE URL. Run make prepare-hub first."
+if [[ "$LATITUDE_IPXE_FORCE_HTTP" == YES && "$url" == https://* ]]; then
+  info "WARNING: Using plaintext HTTP iPXE URL by explicit request; this may expose an access-bearing URL."
+  url="$(printf %s "$url" | sed "s#^https:#http:#")"
+fi
 project_id="$(resolve_latitude_project)"
 mkdir -p "$ROOT/private"
 chmod 700 "$ROOT/private"

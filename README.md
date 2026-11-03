@@ -1,6 +1,6 @@
-# Latitude.sh SNO — RHACM + iPXE + Cloudflare
+# Latitude.sh SNO — RHACM Assisted Installer + iPXE
 
-Deploy a **single-node OpenShift (SNO)** cluster on Latitude.sh bare metal using an **existing RHACM hub**, Terraform, and Assisted Installer iPXE. Cloudflare DNS is configured after the server receives its public IP.
+Deploy a **single-node OpenShift (SNO)** cluster on Latitude.sh bare metal using an **existing RHACM hub**, Terraform, and Assisted Installer iPXE. An optional AWS Network Load Balancer (NLB) avoids truncated RHCOS image downloads from the hub, while Cloudflare publishes the **new SNO cluster's** DNS after the server receives its public IP.
 
 ## Lab defaults
 
@@ -17,7 +17,7 @@ The plan is **12 physical cores / 96 GB RAM**. Verify **Singapore stock, current
 
 ## Quick start (macOS)
 
-Requires `oc` logged into an RHACM/MCE hub with Central Infrastructure Management, Terraform ≥1.6, `jq`, `curl`, `dig`, a Red Hat pull secret, and Cloudflare DNS for the domain.
+Requires `oc` logged into an RHACM/MCE hub with Central Infrastructure Management, Terraform ≥1.6, `jq`, `curl`, `dig`, a Red Hat pull secret, and Cloudflare DNS for the SNO domain. The optional AWS hub ingress workflow also requires `aws` CLI v2, existing AWS permissions for ELBv2/Route53, and a **public Route53 hosted zone** for the hub's image-service hostname.
 
 ```bash
 git clone https://github.com/waynedovey/latitude-sno-rhacm-ipxe.git
@@ -33,6 +33,9 @@ export LATITUDE_AUTH_TOKEN="YOUR_LATITUDE_TOKEN"
 
 make check
 make prepare-hub
+
+# On an AWS hub with truncated image downloads, complete the hub NLB
+# and Route53 workflow below before provisioning the Latitude server.
 CONFIRM_COST=YES make provision
 make discover
 ```
@@ -40,6 +43,41 @@ make discover
 The scripts resolve the Latitude project display name to its project ID using the Latitude API. If preferred, set `LATITUDE_PROJECT` to a `proj_...` ID or slug directly. No server order occurs without `CONFIRM_COST=YES`.
 
 When the Agent appears, set the real `NODE_IP`, `MACHINE_NETWORK_CIDR`, and `INSTALL_DISK_ID` in your ignored `config/lab.env` (use the discovered **disk ID**, not a guessed device path).
+
+### AWS hub image ingress (when using RHACM/MCE on AWS)
+
+**This is separate from Cloudflare DNS for the SNO cluster.** On the AWS RHACM hub, the existing wildcard `*.apps.hub.<hub-domain>` can remain on the operator-managed router's Classic Load Balancer. A dedicated **public NLB** serves only the Assisted Installer's large boot artifacts, and an explicit Route53 **A Alias** for the image service takes precedence over the wildcard. Do **not** change `router-default` or repoint the wildcard.
+
+This was needed in the November 2026 Latitude lab: the original path truncated the ~1.13 GiB `rootfs` download, while the NLB transferred all **1,218,105,344 bytes** (HTTP 200); after reboot, RHCOS started and the Agent appeared in RHACM. The lab's pre-existing NLB Service is named `router-nlb-test` — that is the default in `config/lab.env.example`. Choose another name only if you intend to create another hourly-billed NLB.
+
+1. Set `AWS_REGION`, `HUB_PUBLIC_ROUTE53_ZONE_ID` (the **public zone containing** the hub image hostname), and `IMAGE_NLB_SERVICE` in the ignored `config/lab.env`. Use normal AWS CLI credentials. Do not confuse the public hub zone with `BASE_DOMAIN=digitaldovey.com`, which is for the new SNO cluster.
+2. Provision or reconcile a **separate** NLB Service for ingress HTTP/HTTPS (with Proxy Protocol v2, TCP health checks, and `externalTrafficPolicy: Local`):
+
+   ```bash
+   CONFIRM_IMAGE_NLB=YES make image-nlb
+   ```
+
+3. Verify TCP **80 and 443** listeners and healthy nodePort targets, then download the entire rootfs *directly through the NLB*, without any DNS changes:
+
+   ```bash
+   make image-check
+   ```
+
+4. Create the explicit Route53 Alias only after the image check succeeds:
+
+   ```bash
+   CONFIRM_IMAGE_DNS=YES make image-route53
+   ```
+
+   The DNS script runs the full NLB/rootfs validation again before applying the record, waits for Route53 **INSYNC**, and is idempotent. It refuses to replace another A record unless `ALLOW_IMAGE_DNS_REPLACE=YES` is explicitly supplied; existing CNAME records require manual migration. Check propagation:
+
+   ```bash
+   dig @1.1.1.1 +short assisted-image-service-multicluster-engine.apps.hub.sandbox312.opentlc.com
+   ```
+
+These scripts derive the image hostname from `InfraEnv.status.bootArtifacts.rootfs` and the NLB DNS/alias zone ID from AWS. They do **not** hard-code the example sandbox's ELB, nodePort, or hosted-zone ID, and they never overwrite the wildcard record. An NLB incurs AWS costs; leave it in place only as long as your lab needs it. To revert DNS, remove **only** the exact image-service Alias after confirming it is still the record created for this NLB.
+
+**HTTPS iPXE note:** If Latitude firmware cannot validate the InfraEnv's HTTPS iPXE script, `LATITUDE_IPXE_FORCE_HTTP=YES` explicitly converts the script URL to HTTP when `make provision` runs. HTTP exposes an access-bearing URL in transit: leave this setting `NO` by default, use it only in an isolated lab with accepted risk, and restore HTTPS when possible. This does not disable TLS verification on the hub or the NLB.
 
 ### Configure Cloudflare DNS
 
@@ -75,15 +113,16 @@ CONFIRM_DESTROY=YES make destroy
 ## Workflow
 
 1. `make prepare-hub`: creates a pull secret and InfraEnv in the existing RHACM hub, producing an iPXE boot URL.
-2. `make provision`: Terraform orders the Latitude server in **SGP**, boots RHACM iPXE and uses **hourly** billing.
-3. `make discover`: inspects the Agent, disks and hardware checks.
-4. `make dns`: creates the three Cloudflare records for the assigned IP.
-5. `make install`: creates the AgentClusterInstall/ClusterDeployment and installs SNO; `make status` monitors it.
-6. `make destroy`: releases the billed server (does not automatically delete RHACM resources or Cloudflare DNS).
+2. **If the hub's large image download is truncated:** `make image-nlb`, `make image-check`, and `make image-route53` after explicit confirmation; preserves default router and wildcard.
+3. `make provision`: Terraform orders the Latitude server in **SGP**, boots RHACM iPXE and uses **hourly** billing.
+4. `make discover`: inspects the Agent, disks and hardware checks. Seeing `APPROVED=false` / `ROLE=auto-assign` initially is normal.
+5. `make dns`: creates the three Cloudflare records for the assigned IP.
+6. `make install`: validates the selected disk and host, creates the AgentClusterInstall/ClusterDeployment, and then approves the Agent; `make status` monitors it.
+7. `make destroy`: releases the billed server (does not automatically delete RHACM, NLB, Route53, or Cloudflare resources).
 
 `config/lab.env`, API tokens, pull secrets, kubeconfigs and Terraform state/plans are **never committed**. The InfraEnv iPXE URL is access-bearing and is retained in local Terraform state. Keep that state secure.
 
-**Validation status:** Terraform and Bash syntax are CI-checked. Latitude iPXE boot, site availability, network setup and Cloudflare API calls still require a live end-to-end test. See [troubleshooting](docs/troubleshooting.md).
+**Validation status:** In the November 2026 Latitude lab, the corrected iPXE path downloaded the RHACM kernel/initrd/rootfs, booted RHCOS, applied Ignition, and registered an Agent. The repeatable scripts and other environments still need independent verification; CI checks Bash syntax and Terraform formatting/validation. See [troubleshooting](docs/troubleshooting.md).
 
 ## References
 
