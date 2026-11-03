@@ -1,0 +1,12 @@
+# Credentials, local settings, and Terraform state (including sensitive iPXE URL)
+config/lab.env
+private/
+.env
+*.tfstate
+*.tfstate.*
+*.tfplan
+.terraform/
+.terraform.lock.hcl
+terraform/terraform.tfvars
+terraform/*.auto.tfvars
+.DS_Store

@@ -1,0 +1,19 @@
+name: Static validation
+on:
+  push:
+  pull_request:
+jobs:
+  bash-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bash syntax
+        run: |
+          find scripts -name '*.sh' -print0 | xargs -0 -n1 bash -n
+      - name: Terraform formatting
+        run: |
+          if ! command -v terraform >/dev/null 2>&1; then
+            echo "Terraform CLI unavailable on runner; format validation skipped."
+            exit 0
+          fi
+          terraform -chdir=terraform fmt -check

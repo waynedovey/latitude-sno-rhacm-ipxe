@@ -1,0 +1,27 @@
+variable "latitude_auth_token" {
+  type      = string
+  sensitive = true
+}
+
+variable "project" {
+  type = string
+}
+
+variable "site" {
+  type = string
+}
+
+variable "plan" {
+  type    = string
+  default = "m4.metal.small"
+}
+
+variable "hostname" {
+  type    = string
+  default = "latitude-sno"
+}
+
+variable "ipxe_script" {
+  type      = string
+  sensitive = true
+}
