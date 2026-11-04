@@ -110,6 +110,88 @@ CONFIRM_DESTROY=YES make destroy
 
 **Important:** Installation overwrites the selected NVMe disk. Ensure the node's public IPv4 stays stable, the node reaches RHACM and image registries, and clients can reach TCP **6443 / 80 / 443**. The install script checks public DNS resolution before approving the Agent.
 
+## Post-install: LVM Storage + OpenShift Virtualization (4.22)
+
+After SNO completes installation, the optional post-install workflow installs **Red Hat LVM Storage** and **OpenShift Virtualization**. It operates **only** against the installed SNO API, refusing the RHACM hub kubeconfig. Local LVMS on SNO is not HA and cannot support cross-node VM live migration.
+
+### 1. Obtain the new SNO kubeconfig
+
+From your Mac, while logged into the **RHACM hub**:
+
+```bash
+oc -n latitude-sno get clusterdeployment latitude-sno \
+  -o jsonpath='{.status.clusterMetadata.adminKubeconfigSecretRef.name}{"\n"}'
+
+# Use the actual referenced secret name, if different:
+SECRET_NAME=latitude-sno-admin-kubeconfig
+mkdir -p private
+oc -n latitude-sno get secret "$SECRET_NAME" \
+  -o jsonpath='{.data.kubeconfig}' | base64 -D > private/latitude-sno.kubeconfig
+chmod 600 private/latitude-sno.kubeconfig
+
+oc --kubeconfig=private/latitude-sno.kubeconfig get nodes -o wide
+oc --kubeconfig=private/latitude-sno.kubeconfig get clusterversion
+```
+
+If the secret reference is missing, the Assisted Installer may still be finishing. Set `SNO_KUBECONFIG=private/latitude-sno.kubeconfig` in the ignored `config/lab.env`. Never use the hub's kubeconfig for the following steps.
+
+### 2. Install both operators (does not claim storage)
+
+```bash
+CONFIRM_SNO_OPERATORS=YES make sno-operators
+oc --kubeconfig=private/latitude-sno.kubeconfig get csv -n openshift-storage
+oc --kubeconfig=private/latitude-sno.kubeconfig get csv -n openshift-cnv
+oc --kubeconfig=private/latitude-sno.kubeconfig get hyperconverged -n openshift-cnv
+```
+
+The script validates the SNO API hostname, OpenShift version 4.22, and exactly one Ready node, then installs LVMS in `openshift-storage` and Virtualization in `openshift-cnv`. It creates the `HyperConverged` resource after the Virtualization CSV succeeds. **No LVMCluster is created yet.**
+
+### 3. Identify the spare NVMe by stable hardware ID
+
+**Do not assume `/dev/nvme0n1` is always spare.** Earlier Agent discovery selected that kernel name for OS installation; a later RHCOS boot showed four OS partitions on `/dev/nvme1n1`. The names can switch between boots.
+
+```bash
+ssh core@206.223.224.31 'sudo lsblk -e7 -o NAME,PATH,SIZE,TYPE,FSTYPE,MOUNTPOINTS,MODEL,WWN
+for id in /dev/disk/by-id/nvme-eui.*; do
+  printf "%s -> " "$id"
+  readlink -f "$id"
+done
+sudo wipefs -n /dev/nvme0n1
+sudo wipefs -n /dev/nvme1n1
+sudo pvs'
+```
+
+Identify the **whole** 960 GB NVMe without partitions, mounts, or signatures. Confirm there is no useful data on it. Even if it appears empty, it could contain unrecognised data. Put the verified **spare disk's** by-id path into ignored `config/lab.env`:
+
+```bash
+# EXAMPLE ONLY. Replace with the actual by-id ID resolved on the installed node.
+LVMS_DISK_BY_ID=/dev/disk/by-id/nvme-eui.REPLACE_WITH_VERIFIED_SPARE_ID
+```
+
+Run the read-only device check:
+
+```bash
+make sno-disk-check
+```
+
+The script runs a host-side check through `oc debug node` and rejects devices that have partitions, mounts, or filesystem signatures. If this step fails, it creates **no LVMCluster**.
+
+### 4. Explicitly allocate the spare NVMe to LVMS
+
+**Only after verifying the drive's physical identity and accepting that allocating it to LVMS will make existing data on the whole disk unusable:**
+
+```bash
+CONFIRM_LVMS_DISK=YES make sno-lvms-disk
+
+oc --kubeconfig=private/latitude-sno.kubeconfig get lvmcluster lvmcluster -n openshift-storage
+oc --kubeconfig=private/latitude-sno.kubeconfig get sc lvms-vg1
+oc --kubeconfig=private/latitude-sno.kubeconfig get pods -n openshift-cnv
+```
+
+The generated LVMCluster explicitly chooses **only the verified by-id path**, sets `forceWipeDevicesAndDestroyAllData: false`, and configures an XFS-backed `vg1` with a 90% thin pool. The local storage class is `lvms-vg1`. Do not automatically force-wipe an unidentified or OS disk.
+
+References: [OpenShift 4.22 LVMS](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/storage/persistent-storage-using-local-storage) and [OpenShift 4.22 Virtualization](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/virtualization/installing).
+
 ## Workflow
 
 1. `make prepare-hub`: creates a pull secret and InfraEnv in the existing RHACM hub, producing an iPXE boot URL.
