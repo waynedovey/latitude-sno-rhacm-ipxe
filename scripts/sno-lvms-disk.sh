@@ -55,6 +55,7 @@ spec:
         thinPoolConfig:
           name: thin-pool-1
           sizePercent: 90
+          overprovisionRatio: 10
 YAML
 
 for ((i=1; i<=120; i++)); do
