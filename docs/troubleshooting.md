@@ -46,7 +46,7 @@ Initially `APPROVED=false` and `ROLE=auto-assign` are normal. Do not manually ap
 
 ## Cloudflare DNS
 
-- `make dns` needs `CF_API_TOKEN` with **Zone:Read** and **DNS:Edit**, plus `NODE_IP` in `config/lab.env`.
+- `make dns` needs `CF_API_TOKEN` with **Zone:Read** and **DNS:Edit**; it reads the provisioned server's public IP and subnet from Latitude. Set `NODE_IP` only as a verified override.
 - Cloudflare zone must belong to `BASE_DOMAIN=digitaldovey.com`; `CF_ZONE_ID` can be supplied if auto-lookup is unavailable.
 - Use **DNS only / grey cloud** for API, API-int, and wildcard apps records. Do **not** proxy the OpenShift API through Cloudflare.
 - If the script finds an existing record with a different IP or proxy setting, inspect it first; use `ALLOW_DNS_REPLACE=YES CONFIRM_DNS=YES make dns` only when the overwrite is intentional.
@@ -55,8 +55,8 @@ Initially `APPROVED=false` and `ROLE=auto-assign` are normal. Do not manually ap
 
 ## Agent validation and installation
 
-- `make discover` displays CPU, memory, Agent disk IDs. Use a discovered `INSTALL_DISK_ID`.
-- `MACHINE_NETWORK_CIDR` must contain the **real** `NODE_IP`.
+- `make discover` displays CPU, memory, and Agent disk IDs. `make install` automatically selects the lowest eligible stable NVMe by-id; inspect the selection carefully before confirming, and override `INSTALL_DISK_ID` when needed.
+- The CIDR is retrieved from Latitude and must contain the **real** `NODE_IP`; do not guess the prefix.
 - All three public DNS names must resolve to `NODE_IP` before `make install` approves the Agent.
 - `platformType: None` uses the SNO node public IP and avoids external BMC/VIP allocation; check reachability and supportability.
 - If public IP changes after discovery, fix address stability before continuing.
