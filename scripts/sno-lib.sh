@@ -4,11 +4,19 @@ source "$(dirname "$0")/lib.sh"
 read_config
 need_cmd oc
 need_cmd jq
-need_var SNO_KUBECONFIG
-[[ -s "$SNO_KUBECONFIG" ]] || die "SNO_KUBECONFIG must point to the installed SNO cluster's kubeconfig, not the RHACM hub's"
+# A dedicated SNO_KUBECONFIG is optional: by default use the current oc
+# context. verify_sno_context rejects the hub and any unexpected cluster.
+if [[ -n "${SNO_KUBECONFIG:-}" ]]; then
+  SNO_KUBECONFIG="$(local_path "$SNO_KUBECONFIG")"
+  [[ -s "$SNO_KUBECONFIG" ]] || die "SNO_KUBECONFIG file not found: $SNO_KUBECONFIG"
+fi
 
 sno() {
-  oc --kubeconfig="$SNO_KUBECONFIG" "$@"
+  if [[ -n "${SNO_KUBECONFIG:-}" ]]; then
+    oc --kubeconfig="$SNO_KUBECONFIG" "$@"
+  else
+    oc "$@"
+  fi
 }
 
 verify_sno_context() {

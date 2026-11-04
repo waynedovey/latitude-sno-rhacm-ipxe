@@ -15,10 +15,22 @@ read_config() {
   # Allow environment-provided tokens to take precedence over local config.
   local saved_latitude_token="${LATITUDE_AUTH_TOKEN:-}"
   local saved_cf_token="${CF_API_TOKEN:-}"
+  local saved_node_ip="${NODE_IP:-}"
+  local saved_machine_cidr="${MACHINE_NETWORK_CIDR:-}"
+  local saved_install_disk="${INSTALL_DISK_ID:-}"
+  local saved_agent_id="${AGENT_ID:-}"
+  local saved_sno_kubeconfig="${SNO_KUBECONFIG:-}"
+  local saved_lvms_disk="${LVMS_DISK_BY_ID:-}"
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
   [[ -z "$saved_latitude_token" ]] || LATITUDE_AUTH_TOKEN="$saved_latitude_token"
   [[ -z "$saved_cf_token" ]] || CF_API_TOKEN="$saved_cf_token"
+  [[ -z "$saved_node_ip" ]] || NODE_IP="$saved_node_ip"
+  [[ -z "$saved_machine_cidr" ]] || MACHINE_NETWORK_CIDR="$saved_machine_cidr"
+  [[ -z "$saved_install_disk" ]] || INSTALL_DISK_ID="$saved_install_disk"
+  [[ -z "$saved_agent_id" ]] || AGENT_ID="$saved_agent_id"
+  [[ -z "$saved_sno_kubeconfig" ]] || SNO_KUBECONFIG="$saved_sno_kubeconfig"
+  [[ -z "$saved_lvms_disk" ]] || LVMS_DISK_BY_ID="$saved_lvms_disk"
   : "${CLUSTER_NAME:=latitude-sno}"
   : "${BASE_DOMAIN:=digitaldovey.com}"
   : "${LATITUDE_PLAN:=f4-metal-small}"
@@ -93,4 +105,68 @@ in_ipv4_cidr() {
   b="$(ipv4_int "$cidr_ip")" || return 1
   if (( prefix == 0 )); then mask=0; else mask=$(( (0xffffffff << (32-prefix)) & 0xffffffff )); fi
   (( (a & mask) == (b & mask) ))
+}
+
+
+# Resolve the provisioned server's management IP and network from Latitude.
+# Values may be explicitly overridden, but never inferred from the server plan.
+resolve_latitude_network() {
+  [[ -n "${NODE_IP:-}" && -n "${MACHINE_NETWORK_CIDR:-}" ]] && return 0
+  need_cmd terraform
+  need_cmd curl
+  need_cmd jq
+  need_var LATITUDE_AUTH_TOKEN
+  [[ -f "$ROOT/terraform/terraform.tfstate" ]] ||
+    die "No Terraform state. Provision the server first or explicitly set NODE_IP and MACHINE_NETWORK_CIDR."
+
+  local server_id response count address cidr
+  server_id="$(terraform -chdir="$ROOT/terraform" output -raw server_id)" ||
+    die "Cannot read Latitude server ID from Terraform state"
+  [[ "$server_id" == sv_* ]] || die "Unexpected Latitude server ID: $server_id"
+  response="$(curl --fail --silent --show-error --retry 2 --connect-timeout 15 --get \
+    --header "Authorization: $LATITUDE_AUTH_TOKEN" \
+    --data-urlencode "filter[server]=$server_id" \
+    --data-urlencode "filter[management]=true" \
+    --data-urlencode "page[size]=100" \
+    "https://api.latitude.sh/ips")" ||
+    die "Unable to look up assigned management IPv4 for Latitude server $server_id"
+
+  count="$(jq '[.data[]? | select(.attributes.management == true)
+    | select(.attributes.address | type == "string" and test("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$"))] | length' <<< "$response")"
+  (( count == 1 )) ||
+    die "Expected exactly one management IPv4 for server $server_id; found $count. Set explicit overrides after verifying Latitude networking."
+  address="$(jq -r '.data[] | select(.attributes.management == true)
+    | select(.attributes.address | type == "string" and test("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$"))
+    | .attributes.address' <<< "$response")"
+  cidr="$(jq -r --arg ip "$address" '.data[] | select(.attributes.address == $ip) | .attributes.cidr // empty' <<< "$response")"
+
+  [[ -z "${NODE_IP:-}" || "$NODE_IP" == "$address" ]] ||
+    die "NODE_IP=$NODE_IP disagrees with Latitude's management IPv4 $address"
+  NODE_IP="$address"
+
+  # Normalize host/prefix to the actual network address/prefix.
+  if [[ "$cidr" =~ ^[0-9]+$ ]]; then cidr="$NODE_IP/$cidr"; fi
+  if [[ "$cidr" =~ ^/[0-9]+$ ]]; then cidr="$NODE_IP$cidr"; fi
+  if [[ -z "${MACHINE_NETWORK_CIDR:-}" ]]; then
+    [[ -n "$cidr" ]] || die "Latitude did not return a CIDR. Verify its network; do not guess /24 or /31."
+    MACHINE_NETWORK_CIDR="$(canonical_ipv4_cidr "$cidr")" ||
+      die "Unexpected Latitude management network CIDR: $cidr"
+  fi
+  in_ipv4_cidr "$NODE_IP" "$MACHINE_NETWORK_CIDR" ||
+    die "Latitude management IPv4 $NODE_IP is outside $MACHINE_NETWORK_CIDR"
+  info "Latitude network auto-detected: $NODE_IP on $MACHINE_NETWORK_CIDR (server $server_id)."
+}
+
+canonical_ipv4_cidr() {
+  local address prefix ip mask network
+  IFS=/ read -r address prefix <<< "$1"
+  [[ "$prefix" =~ ^[0-9]+$ ]] && (( prefix >= 0 && prefix <= 32 )) || return 1
+  ip="$(ipv4_int "$address")" || return 1
+  if (( prefix == 0 )); then mask=0
+  else mask=$(( (0xffffffff << (32-prefix)) & 0xffffffff ))
+  fi
+  network=$(( ip & mask ))
+  printf '%d.%d.%d.%d/%d\n' \
+    "$(( (network >> 24) & 255 ))" "$(( (network >> 16) & 255 ))" \
+    "$(( (network >> 8) & 255 ))" "$(( network & 255 ))" "$prefix"
 }

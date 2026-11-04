@@ -42,7 +42,9 @@ make discover
 
 The scripts resolve the Latitude project display name to its project ID using the Latitude API. If preferred, set `LATITUDE_PROJECT` to a `proj_...` ID or slug directly. No server order occurs without `CONFIRM_COST=YES`.
 
-When the Agent appears, set the real `NODE_IP`, `MACHINE_NETWORK_CIDR`, and `INSTALL_DISK_ID` in your ignored `config/lab.env` (use the discovered **disk ID**, not a guessed device path).
+When the Agent appears, **no IP/CIDR/disk-ID editing is needed**. `make dns` and `make install` query Latitude's assigned management IPv4 and CIDR for the exact Terraform-managed server. `make install` selects the lowest eligible, stable NVMe by-id from Agent inventory. Review the choice printed by `make discover` and `make install` carefully before setting `CONFIRM_INSTALL=YES`—both disks could contain important data even when the installer calls them eligible. To choose a different disk, set `INSTALL_DISK_ID` explicitly.
+
+The following values are **optional overrides**, not required configuration: `NODE_IP`, `MACHINE_NETWORK_CIDR`, `INSTALL_DISK_ID`, and `AGENT_ID`. Auto-discovery intentionally fails closed if the server's management IP or eligible disk cannot be identified unambiguously. Keep the Latitude API token available for DNS and installation; scripts never assume a subnet based on the hardware plan.
 
 ### AWS hub image ingress (when using RHACM/MCE on AWS)
 
@@ -96,7 +98,7 @@ Only three **DNS-only (unproxied) A** records are created:
 | `api-int.latitude-sno.digitaldovey.com` | `NODE_IP` |
 | `*.apps.latitude-sno.digitaldovey.com` | `NODE_IP` |
 
-`make dns` is idempotent. It **refuses to overwrite** an existing record pointing elsewhere or with the Cloudflare proxy enabled unless you explicitly pass `ALLOW_DNS_REPLACE=YES` as well. It never modifies other domains or records. Ensure your domain's nameservers actually delegate to Cloudflare and allow DNS propagation before installing.
+`make dns` automatically reads the exact public IPv4 and machine subnet assigned by Latitude using the provisioned server ID. It is idempotent and **refuses to overwrite** an existing record pointing elsewhere or with the Cloudflare proxy enabled unless you explicitly pass `ALLOW_DNS_REPLACE=YES` as well. It never modifies other domains or records. Ensure your domain's nameservers actually delegate to Cloudflare and allow DNS propagation before installing.
 
 ### Install and clean up
 
@@ -108,7 +110,7 @@ make status
 CONFIRM_DESTROY=YES make destroy
 ```
 
-**Important:** Installation overwrites the selected NVMe disk. Ensure the node's public IPv4 stays stable, the node reaches RHACM and image registries, and clients can reach TCP **6443 / 80 / 443**. The install script checks public DNS resolution before approving the Agent.
+**Important:** Installation overwrites the automatically selected NVMe disk, which is not necessarily empty. Read the selected by-id path in the preflight output and override it if necessary. Ensure the node's public IPv4 stays stable, the node reaches RHACM and image registries, and clients can reach TCP **6443 / 80 / 443**. The install script checks public DNS resolution before approving the Agent. The explicit `CONFIRM_INSTALL=YES` safeguard remains mandatory.
 
 ## Post-install: LVM Storage + OpenShift Virtualization (4.22)
 
@@ -133,16 +135,20 @@ oc --kubeconfig=private/latitude-sno.kubeconfig get nodes -o wide
 oc --kubeconfig=private/latitude-sno.kubeconfig get clusterversion
 ```
 
-If the secret reference is missing, the Assisted Installer may still be finishing. Set `SNO_KUBECONFIG=private/latitude-sno.kubeconfig` in the ignored `config/lab.env`. Never use the hub's kubeconfig for the following steps.
+If the secret reference is missing, the Assisted Installer may still be finishing. For post-install commands, either **switch your current `oc` context to the new SNO** or set `SNO_KUBECONFIG=private/latitude-sno.kubeconfig` as an optional override (in your shell or ignored `config/lab.env`). You no longer need to configure the path for each run. Every post-install script verifies the exact SNO API URL, version, and single Ready node and **rejects the RHACM hub context**.
 
 ### 2. Install both operators (does not claim storage)
 
 ```bash
+# First select the installed SNO in your current oc context.
+oc config use-context YOUR_SNO_CONTEXT
 CONFIRM_SNO_OPERATORS=YES make sno-operators
-oc --kubeconfig=private/latitude-sno.kubeconfig get csv -n openshift-storage
-oc --kubeconfig=private/latitude-sno.kubeconfig get csv -n openshift-cnv
-oc --kubeconfig=private/latitude-sno.kubeconfig get hyperconverged -n openshift-cnv
+oc get csv -n openshift-storage
+oc get csv -n openshift-cnv
+oc get hyperconverged -n openshift-cnv
 ```
+
+If you prefer not to change context, set `SNO_KUBECONFIG=private/latitude-sno.kubeconfig` once in your shell or ignored config file; in that case use `oc --kubeconfig=private/latitude-sno.kubeconfig` for the verification commands. No context switch is needed when your current `oc` connection already points to the SNO.
 
 The script validates the SNO API hostname, OpenShift version 4.22, and exactly one Ready node, then installs LVMS in `openshift-storage` and Virtualization in `openshift-cnv`. It creates the `HyperConverged` resource after the Virtualization CSV succeeds. **No LVMCluster is created yet.**
 
@@ -161,20 +167,15 @@ sudo wipefs -n /dev/nvme1n1
 sudo pvs'
 ```
 
-Identify the **whole** 960 GB NVMe without partitions, mounts, or signatures. Confirm there is no useful data on it. Even if it appears empty, it could contain unrecognised data. Put the verified **spare disk's** by-id path into ignored `config/lab.env`:
+The disk-ID setting is now **optional**. The script probes the installed SNO and selects a spare disk **only when exactly one entire NVMe is partition-free, unmounted, and has no detectable signatures**. If there is more than one candidate—or none—it stops and requires manual verification. This deliberately avoids using unstable `/dev/nvme0n1` numbering.
 
-```bash
-# EXAMPLE ONLY. Replace with the actual by-id ID resolved on the installed node.
-LVMS_DISK_BY_ID=/dev/disk/by-id/nvme-eui.REPLACE_WITH_VERIFIED_SPARE_ID
-```
-
-Run the read-only device check:
+Run the read-only device check (no data changed):
 
 ```bash
 make sno-disk-check
 ```
 
-The script runs a host-side check through `oc debug node` and rejects devices that have partitions, mounts, or filesystem signatures. If this step fails, it creates **no LVMCluster**.
+The output prints the selected **stable by-id path**. Independently verify its device identity and that it contains no useful data before continuing: even an apparently blank device can contain undetectable data. You may override the choice with `LVMS_DISK_BY_ID=/dev/disk/by-id/nvme-eui.YOUR_VERIFIED_ID`. If the check fails, it creates **no LVMCluster**. After a volume is created, this blank-disk discovery no longer applies; existing LVMCluster storage is left untouched.
 
 ### 4. Explicitly allocate the spare NVMe to LVMS
 
@@ -183,12 +184,12 @@ The script runs a host-side check through `oc debug node` and rejects devices th
 ```bash
 CONFIRM_LVMS_DISK=YES make sno-lvms-disk
 
-oc --kubeconfig=private/latitude-sno.kubeconfig get lvmcluster lvmcluster -n openshift-storage
-oc --kubeconfig=private/latitude-sno.kubeconfig get sc lvms-vg1
-oc --kubeconfig=private/latitude-sno.kubeconfig get pods -n openshift-cnv
+oc get lvmcluster lvmcluster -n openshift-storage
+oc get sc lvms-vg1
+oc get pods -n openshift-cnv
 ```
 
-The generated LVMCluster explicitly chooses **only the verified by-id path**, sets `forceWipeDevicesAndDestroyAllData: false`, and configures an XFS-backed `vg1` with a 90% thin pool and the required `overprovisionRatio: 10`. This 10:1 ratio permits *logical* overprovisioning; it does not increase physical capacity. Monitor thin-pool usage to avoid exhaustion. The local storage class is `lvms-vg1`. Do not automatically force-wipe an unidentified or OS disk.
+The generated LVMCluster explicitly chooses **only the checked, stable by-id path**, sets `forceWipeDevicesAndDestroyAllData: false`, and configures an XFS-backed `vg1` with a 90% thin pool and the required `overprovisionRatio: 10`. This 10:1 ratio permits *logical* overprovisioning; it does not increase physical capacity. Monitor thin-pool usage to avoid exhaustion. The local storage class is `lvms-vg1`. Do not automatically force-wipe an unidentified or OS disk.
 
 References: [OpenShift 4.22 LVMS](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/storage/persistent-storage-using-local-storage) and [OpenShift 4.22 Virtualization](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/virtualization/installing).
 
@@ -197,9 +198,9 @@ References: [OpenShift 4.22 LVMS](https://docs.redhat.com/en/documentation/opens
 1. `make prepare-hub`: creates a pull secret and InfraEnv in the existing RHACM hub, producing an iPXE boot URL.
 2. **If the hub's large image download is truncated:** `make image-nlb`, `make image-check`, and `make image-route53` after explicit confirmation; preserves default router and wildcard.
 3. `make provision`: Terraform orders the Latitude server in **SGP**, boots RHACM iPXE and uses **hourly** billing.
-4. `make discover`: inspects the Agent, disks and hardware checks. Seeing `APPROVED=false` / `ROLE=auto-assign` initially is normal.
-5. `make dns`: creates the three Cloudflare records for the assigned IP.
-6. `make install`: validates the selected disk and host, creates the AgentClusterInstall/ClusterDeployment, and then approves the Agent; `make status` monitors it.
+4. `make discover`: inspects the Agent, eligible disks and hardware checks (IP/CIDR and OS disk selection are automatic). Seeing `APPROVED=false` / `ROLE=auto-assign` initially is normal.
+5. `make dns`: looks up Latitude's actual management IPv4/subnet and creates the three Cloudflare records for the assigned IP.
+6. `make install`: auto-selects an eligible stable NVMe disk (with an explicit confirmation before erasure), validates the host, creates the AgentClusterInstall/ClusterDeployment, and then approves the Agent; `make status` monitors it.
 7. `make destroy`: releases the billed server (does not automatically delete RHACM, NLB, Route53, or Cloudflare resources).
 
 `config/lab.env`, API tokens, pull secrets, kubeconfigs and Terraform state/plans are **never committed**. The InfraEnv iPXE URL is access-bearing and is retained in local Terraform state. Keep that state secure.

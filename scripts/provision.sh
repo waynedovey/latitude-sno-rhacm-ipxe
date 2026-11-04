@@ -26,4 +26,4 @@ info "Provisioning $LATITUDE_PLAN / $LATITUDE_SITE in Latitude project $project_
 terraform -chdir="$ROOT/terraform" init -input=false
 terraform -chdir="$ROOT/terraform" plan -input=false -out="$ROOT/private/provision.tfplan"
 terraform -chdir="$ROOT/terraform" apply -input=false "$ROOT/private/provision.tfplan"
-info "Provisioned. Identify the public IPv4 and actual network CIDR in Latitude; then run make discover."
+info "Provisioned. Run make discover, then CONFIRM_DNS=YES make dns; the IP/CIDR are read from Latitude automatically."

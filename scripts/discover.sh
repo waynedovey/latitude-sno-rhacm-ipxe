@@ -14,10 +14,10 @@ jq -r '
     .status.inventory | if type=="string" then fromjson else . end |
     "  CPUs: \(.cpu.count // .cpu.cores // "unknown")",
     "  RAM bytes: \(.memory.physicalBytes // "unknown")",
-    "  Disks (copy the desired ID into INSTALL_DISK_ID):",
+    "  Disks (lowest eligible by-id chosen for OS unless INSTALL_DISK_ID overrides):",
     (.disks[]? | "    id=\(.id) path=\(.path // .name // "unknown") bytes=\(.sizeBytes // "unknown") eligible=\(.installationEligibility.eligible // "unknown")"),
     "  Interfaces:",
     (.interfaces[]? | "    \(.name // "unknown") MAC=\(.macAddress // "unknown") IPv4=\(.ipv4Addresses // [] | join(","))")
   )
 ' <<< "$data"
-info "Do not assume Latitude's network from the plan alone. Get the assigned public IPv4 and subnet from the Latitude dashboard."
+info "NODE_IP and MACHINE_NETWORK_CIDR are read from Latitude's management IP API by make dns/install; no manual config required."

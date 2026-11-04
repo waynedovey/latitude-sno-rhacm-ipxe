@@ -6,9 +6,7 @@ need_cmd dig
 need_hub
 need_var CLUSTER_IMAGE_SET
 need_var BASE_DOMAIN
-need_var NODE_IP
-need_var MACHINE_NETWORK_CIDR
-need_var INSTALL_DISK_ID
+resolve_latitude_network
 [[ "${CONFIRM_INSTALL:-}" == YES ]] || die "Installation erases the selected NVMe disk. Inspect make discover, then run CONFIRM_INSTALL=YES make install"
 
 ipv4_int "$NODE_IP" >/dev/null || die "NODE_IP is not valid IPv4"
@@ -39,6 +37,21 @@ cpu="$(jq -r '.cpu.count // .cpu.cores // 0' <<< "$inventory")"
 ram="$(jq -r '.memory.physicalBytes // 0' <<< "$inventory")"
 (( cpu >= 8 )) || die "Only $cpu CPUs reported (SNO requires at least 8 logical vCPUs); use a bigger Latitude plan"
 (( ram >= 17179869184 )) || die "Less than 16 GiB RAM reported; use a bigger Latitude plan"
+if [[ -z "${INSTALL_DISK_ID:-}" ]]; then
+  eligible_ids="$(jq -r '
+    .disks[]? | select(.installationEligibility.eligible // true)
+    | select((.sizeBytes // 0) >= 128849018880)
+    | .id | select(startswith("/dev/disk/by-id/nvme-") and (contains("-part") | not))
+  ' <<< "$inventory" | sort -u)"
+  [[ -n "$eligible_ids" ]] || die "No eligible whole NVMe disk in Agent inventory; run make discover."
+  INSTALL_DISK_ID="$(printf '%s\n' "$eligible_ids" | head -n 1)"
+  choices="$(printf '%s\n' "$eligible_ids" | wc -l | tr -d "[:space:]")"
+  if (( choices > 1 )); then
+    info "WARNING: $choices eligible NVMe disks. Defaulting to the lowest stable by-id path for OS installation."
+    info "This choice is deterministic, NOT a guarantee the disk has no data. Override with INSTALL_DISK_ID if necessary."
+  fi
+  info "Auto-selected OS disk: $INSTALL_DISK_ID (CONFIRM_INSTALL=YES is still required)."
+fi
 disk="$(jq -c --arg id "$INSTALL_DISK_ID" '.disks[]? | select(.id==$id)' <<< "$inventory")"
 [[ -n "$disk" ]] || die "INSTALL_DISK_ID not found in discovered Agent inventory"
 disk_bytes="$(jq -r '.sizeBytes // 0' <<< "$disk")"

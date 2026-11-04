@@ -1,7 +1,38 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/sno-lib.sh"
 verify_sno_context
-need_var LVMS_DISK_BY_ID
+
+# Discover the only completely blank, whole NVMe disk on the installed SNO.
+# Never infer this from /dev/nvme0n1 numbering or the Latitude plan.
+if [[ -z "${LVMS_DISK_BY_ID:-}" ]]; then
+  info "Searching the SNO host for exactly one unused NVMe disk..."
+  candidates="$(sno debug "node/$SNO_NODE" -- chroot /host /bin/bash -c '
+set -euo pipefail
+seen=" "
+# Prefer EUI-style links; deduplicate aliases referring to the same physical disk.
+for link in /dev/disk/by-id/nvme-eui.* /dev/disk/by-id/nvme-*; do
+  [[ -L "$link" && "$link" != *-part* ]] || continue
+  disk="$(readlink -f "$link")"
+  [[ "$disk" =~ ^/dev/nvme[0-9]+n[0-9]+$ ]] || continue
+  case "$seen" in *" $disk "*) continue ;; esac
+  seen="$seen$disk "
+  [[ "$(lsblk -dnro TYPE "$disk")" == disk ]] || continue
+  [[ "$(lsblk -nrpo TYPE "$disk" | wc -l | tr -d "[:space:]")" == 1 ]] || continue
+  [[ -z "$(lsblk -dnro FSTYPE "$disk")" ]] || continue
+  [[ -z "$(lsblk -dnro MOUNTPOINTS "$disk")" ]] || continue
+  [[ -z "$(wipefs -n "$disk")" ]] || continue
+  printf "%s\n" "$link"
+done
+' | sed -n '/^\/dev\/disk\/by-id\/nvme-/p' | sort -u)" ||
+    die "Unable to inventory candidate NVMe disks on SNO."
+  if [[ -z "$candidates" ]]; then
+    die "No blank whole NVMe disk found; leave an existing LVMS volume alone, or explicitly set LVMS_DISK_BY_ID after verification."
+  fi
+  count="$(printf '%s\n' "$candidates" | wc -l | tr -d "[:space:]")"
+  (( count == 1 )) || die "$count blank NVMe candidates found. Set LVMS_DISK_BY_ID explicitly; refusing to guess."
+  LVMS_DISK_BY_ID="$candidates"
+  info "Auto-selected the only unused NVMe disk for LVMS: $LVMS_DISK_BY_ID"
+fi
 
 # NVMe kernel names can switch between boots. A by-id path is mandatory.
 [[ "$LVMS_DISK_BY_ID" == /dev/disk/by-id/nvme-* ]] || die "LVMS_DISK_BY_ID must be a whole NVMe /dev/disk/by-id/nvme-* link, never /dev/nvme0n1"

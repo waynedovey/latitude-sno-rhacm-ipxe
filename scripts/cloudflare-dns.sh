@@ -4,10 +4,10 @@ read_config
 need_cmd curl
 need_cmd jq
 need_var BASE_DOMAIN
-need_var NODE_IP
+resolve_latitude_network
 need_var CF_API_TOKEN
 [[ "${CONFIRM_DNS:-}" == YES ]] ||
-  die "Cloudflare DNS changes require confirmation. After setting NODE_IP, run CONFIRM_DNS=YES make dns"
+  die "Cloudflare DNS changes require confirmation. Run CONFIRM_DNS=YES make dns"
 ipv4_int "$NODE_IP" >/dev/null || die "NODE_IP must be a valid IPv4 address"
 
 CF_API_URL="https://api.cloudflare.com/client/v4"
