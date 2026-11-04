@@ -188,7 +188,7 @@ oc --kubeconfig=private/latitude-sno.kubeconfig get sc lvms-vg1
 oc --kubeconfig=private/latitude-sno.kubeconfig get pods -n openshift-cnv
 ```
 
-The generated LVMCluster explicitly chooses **only the verified by-id path**, sets `forceWipeDevicesAndDestroyAllData: false`, and configures an XFS-backed `vg1` with a 90% thin pool. The local storage class is `lvms-vg1`. Do not automatically force-wipe an unidentified or OS disk.
+The generated LVMCluster explicitly chooses **only the verified by-id path**, sets `forceWipeDevicesAndDestroyAllData: false`, and configures an XFS-backed `vg1` with a 90% thin pool and the required `overprovisionRatio: 10`. This 10:1 ratio permits *logical* overprovisioning; it does not increase physical capacity. Monitor thin-pool usage to avoid exhaustion. The local storage class is `lvms-vg1`. Do not automatically force-wipe an unidentified or OS disk.
 
 References: [OpenShift 4.22 LVMS](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/storage/persistent-storage-using-local-storage) and [OpenShift 4.22 Virtualization](https://docs.redhat.com/en/documentation/openshift_container_platform/4.22/html/virtualization/installing).
 
